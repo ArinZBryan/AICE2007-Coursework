@@ -171,6 +171,50 @@ let map_addr (addr:quad) : int option =
     - update the registers and/or memory appropriately
     - set the condition flags
 *)
+
+
+let index_of_addr (addr:int64) : int =
+  match map_addr addr with
+  | Some i -> i
+  | None -> raise X86lite_segfault
+
+let read_quad (m:mach) (addr:int64) : int64 =
+  let i0 = index_of_addr addr in
+  let bytes = List.init 8 (fun k -> m.mem.(i0 + k)) in
+  int64_of_sbytes bytes
+
+
+let write_quad (m:mach) (addr:int64) (v:int64) : unit =
+  let i0 = index_of_addr addr in
+  let bs = sbytes_of_int64 v in
+  List.iteri (fun k sb -> m.mem.(i0 + k) <- sb) bs
+
+
+let eff_addr (m:mach) (op:operand) : int64 = 
+  match op with 
+  | Ind1 (Lit off) -> off 
+  | Ind2 r -> m.regs.(rind r)
+  | Ind3 (Lit off, r) -> Int64.add off m.regs.(rind r)
+
+  | Ind1 (Lbl _) | Ind3 (Lbl _, _) ->   invalid_arg "eff_addr: label still present (assemble should patch it)"
+
+  | Imm _ | Reg _ -> invalid_arg "eff_addr: not an indirect operand"
+let read_op (m:mach) (op:operand) : int64 =
+  match op with
+  | Imm (Lit i) -> i
+  | Reg r -> m.regs.(rind r)
+  | Ind1 _ | Ind2 _ | Ind3 _ ->
+    let a = eff_addr m op in
+      read_quad m a
+  | Imm (Lbl _) ->  invalid_arg "read_op: label still present (assemble should patch it)"
+
+let write_op (m:mach) (dst:operand) (v:int64) : unit =
+  match dst with
+  | Reg r -> m.regs.(rind r) <- v
+  | Ind1 _ | Ind2 _ | Ind3 _ ->
+    let a = eff_addr m dst in
+      write_quad m a v
+  | Imm _ ->  invalid_arg "write_op: cannot write to an immediate"
 let step (m:mach) : unit =
 failwith "step unimplemented"
 
