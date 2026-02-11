@@ -92,16 +92,22 @@ let rind : reg -> int = function
 
 (* Convert an int64 to its sbyte representation *)
 let sbytes_of_int64 (i:int64) : sbyte list =
-  let open Char in 
-  let open Int64 in
-  List.map (fun n -> Byte (shift_right i n |> logand 0xffL |> to_int |> chr))
-           [0; 8; 16; 24; 32; 40; 48; 56]
+  let get_byte_of_int (source: int64) (byte_n: int) : sbyte =
+    Byte (Int64.shift_right source byte_n
+    |> Int64.logand 0xffL
+    |> Int64.to_int
+    |> Char.chr
+    )
+  in
+  
+  List.map (get_byte_of_int i) [0; 8; 16; 24; 32; 40; 48; 56]
 
 (* Convert an sbyte representation to an int64 *)
 let int64_of_sbytes (bs:sbyte list) : int64 =
   let open Char in
   let open Int64 in
-  let f b i = match b with
+  let f (b : sbyte) (i : quad) : int64 = 
+    match b with
     | Byte c -> logor (shift_left i 8) (c |> code |> of_int)
     | _ -> 0L
   in
@@ -109,15 +115,17 @@ let int64_of_sbytes (bs:sbyte list) : int64 =
 
 (* Convert a string to its sbyte representation *)
 let sbytes_of_string (s:string) : sbyte list =
-  let rec loop acc = function
+  let rec loop (acc : sbyte list) (i : int) = 
+    match i with
     | i when i < 0 -> acc
     | i -> loop (Byte s.[i]::acc) (pred i)
   in
-  loop [Byte '\x00'] @@ String.length s - 1
+  loop [Byte '\x00'] ((String.length s) - 1)
 
 (* Serialize an instruction to sbytes *)
 let sbytes_of_ins (op, args:ins) : sbyte list =
-  let check = function
+  let check (o : operand) = 
+    match o with
     | Imm (Lbl _) | Ind1 (Lbl _) | Ind3 (Lbl _, _) -> 
       invalid_arg "sbytes_of_ins: tried to serialize a label!"
     | _ -> ()
@@ -127,7 +135,8 @@ let sbytes_of_ins (op, args:ins) : sbyte list =
    InsFrag; InsFrag; InsFrag; InsFrag]
 
 (* Serialize a data element to sbytes *)
-let sbytes_of_data : data -> sbyte list = function
+let sbytes_of_data (d: data) : sbyte list =
+  match d with
   | Quad (Lit i) -> sbytes_of_int64 i
   | Asciz s -> sbytes_of_string s
   | Quad (Lbl _) -> invalid_arg "sbytes_of_data: tried to serialize a label!"
