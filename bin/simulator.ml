@@ -154,12 +154,15 @@ let debug_simulator = ref false
 (* Interpret a condition code with respect to the given flags. *)
 let interp_cnd {fo; fs; fz} : cnd -> bool = fun x -> failwith "interp_cnd unimplemented"
 
-
-
 (* Maps an X86lite address into Some OCaml array index,
-   or None if the address is not within the legal address space. *)
+   or None if the address is no(t within the legal address space. *)
 let map_addr (addr:quad) : int option =
-  failwith "map_addr not implemented"
+  (* mem_bot = 0x400000L
+     mem_top = 0x410000L *)
+  if Int64.compare addr mem_bot < 0 (* addr < minimum *)
+     || Int64.compare addr mem_top > 0 (* addr > maximum *)
+    then None (* Address out of bounds *)
+    else Some (Int64.to_int (Int64.sub addr mem_bot))
 
 (* Simulates one step of the machine:
     - fetch the instruction at %rip
