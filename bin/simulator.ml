@@ -157,12 +157,10 @@ let interp_cnd {fo; fs; fz} : cnd -> bool = fun x -> failwith "interp_cnd unimpl
 (* Maps an X86lite address into Some OCaml array index,
    or None if the address is no(t within the legal address space. *)
 let map_addr (addr:quad) : int option =
-  (* mem_bot = 0x400000L
-     mem_top = 0x410000L *)
   if Int64.compare addr mem_bot < 0 (* addr < minimum *)
-     || Int64.compare addr mem_top > 0 (* addr > maximum *)
+     || Int64.compare addr mem_top >= 0 (* addr >= maximum + 1 *)
     then None (* Address out of bounds *)
-    else Some (Int64.to_int (Int64.sub addr mem_bot))
+    else Some (Int64.to_int (Int64.sub addr mem_bot)) (* index starting at bottom addr *)
 
 (* Simulates one step of the machine:
     - fetch the instruction at %rip
