@@ -19,6 +19,11 @@ let exit_addr = 0xfdeadL         (* halt when m.regs(%rip) = exit_addr *)
 (* Your simulator should raise this exception if it tries to read from or
    store to an address not within the valid address space. *)
 exception X86lite_segfault
+exception X86lite_unalignedInstruction
+exception X86lite_nonExecutableInstruction
+exception X86lite_badIndirectAddressing
+exception X86lite_unassembledLabel
+exception X86lite_cmpqImmediateArgument
 
 (* The simulator memory maps addresses to symbolic bytes.  Symbolic
    bytes are either actual data indicated by the Byte constructor or
@@ -64,9 +69,9 @@ type sbyte = InsB0 of ins       (* 1st byte of an instruction *)
 type mem = sbyte array
 
 (* Flags for condition codes *)
-type flags = { mutable fo : bool
-             ; mutable fs : bool
-             ; mutable fz : bool
+type flags = { mutable fo : bool (*Last operation caused overflow*)
+             ; mutable fs : bool (*Last operation result sign*)
+             ; mutable fz : bool (*Last operation equals zero*)
              }
 
 (* Register files *)
@@ -81,7 +86,8 @@ type mach = { flags : flags
 (* simulator helper functions ----------------------------------------------- *)
 
 (* The index of a register in the regs array *)
-let rind : reg -> int = function
+let rind (r: reg) : int = 
+  match r with
   | Rip -> 16
   | Rax -> 0  | Rbx -> 1  | Rcx -> 2  | Rdx -> 3
   | Rsi -> 4  | Rdi -> 5  | Rbp -> 6  | Rsp -> 7
@@ -152,7 +158,14 @@ let sbytes_of_data (d: data) : sbyte list =
 let debug_simulator = ref false
 
 (* Interpret a condition code with respect to the given flags. *)
-let interp_cnd {fo; fs; fz} : cnd -> bool = fun x -> failwith "interp_cnd unimplemented"
+let interp_cnd (flags : flags) (cnd : cnd) : bool = 
+  match cnd with
+  | Eq -> flags.fz
+  | Neq -> not flags.fz
+  | Gt -> not ((flags.fs <> flags.fo) || flags.fz)
+  | Ge -> not (flags.fs <> flags.fo)
+  | Lt -> flags.fs <> flags.fo
+  | Le -> (flags.fs <> flags.fo) || flags.fz
 
 (* Maps an X86lite address into Some OCaml array index,
    or None if the address is no(t within the legal address space. *)
@@ -162,6 +175,74 @@ let map_addr (addr:quad) : int option =
     then None (* Address out of bounds *)
     else Some (Int64.to_int (Int64.sub addr mem_bot)) (* index starting at bottom addr *)
 
+let map_addr_nofail (addr:quad) : int =
+  match map_addr addr with
+  | Some a -> a
+  | None -> raise X86lite_segfault
+
+let read_mem_byte (m : mach) (addr:quad) : sbyte =
+  m.mem.(map_addr_nofail addr)
+
+let read_mem_qword (m : mach) (addr:quad) : sbyte array =
+  Array.sub m.mem (map_addr_nofail addr) 8
+
+let read_mem_quad (m : mach) (addr:quad) : quad =
+  int64_of_sbytes (Array.to_list (read_mem_qword m addr))
+
+let write_mem_byte (m : mach) (addr : quad) (v : sbyte): unit =
+  m.mem.(map_addr_nofail addr) <- v
+
+let write_mem_qword (m : mach) (addr : quad) (v : sbyte array) : unit = 
+  Array.iteri (fun (i : int) (b : sbyte) -> write_mem_byte m (Int64.add addr (Int64.of_int i)) b) v
+
+let write_mem_quad (m : mach) (addr : quad) (v : quad) : unit = 
+  write_mem_qword m addr (Array.of_list (sbytes_of_int64 v))
+
+let get_reg (m : mach) (r : reg) : quad =
+  m.regs.(rind r)
+
+let set_reg (m : mach) (r : reg) (v : quad) : unit =
+  m.regs.(rind r) <- v
+
+let eff_addr (m:mach) (op:operand) : int64 = 
+  match op with 
+  | Ind1 (Lit off) -> Int64.add off (get_reg m Rip) 
+  | Ind2 r -> get_reg m r
+  | Ind3 (Lit off, r) -> Int64.add off (get_reg m r)
+
+  | Ind1 (Lbl _) | Ind3 (Lbl _, _) -> raise X86lite_unassembledLabel
+
+  | Imm _ | Reg _ -> raise X86lite_badIndirectAddressing
+
+let read_op (m:mach) (op:operand) : int64 =
+  match op with
+  | Imm (Lit i) -> i
+  | Reg r -> get_reg m r
+  | Ind1 _ | Ind2 _ | Ind3 _ ->
+    let a = eff_addr m op in
+      read_mem_quad m a
+  | Imm (Lbl _) ->  invalid_arg "read_op: label still present (assemble should patch it)"
+
+let write_op (m:mach) (dst:operand) (v:int64) : unit =
+  match dst with
+  | Reg r -> set_reg m r v
+  | Ind1 _ | Ind2 _ | Ind3 _ ->
+    let a = eff_addr m dst in
+      write_mem_quad m a v
+  | Imm _ ->  invalid_arg "write_op: cannot write to an immediate"
+
+let set_flags (f : flags) (r : Int64_overflow.t) : unit =
+  f.fo <- r.overflow;
+  f.fs <- r.value < 0L;
+  f.fz <- r.value = 0L;
+  ()
+
+let ins_opcode (i : ins) : opcode = 
+  fst i
+
+let ins_operands (i : ins) : operand list = 
+  snd i
+
 (* Simulates one step of the machine:
     - fetch the instruction at %rip
     - compute the source and/or destination information from the operands
@@ -170,58 +251,176 @@ let map_addr (addr:quad) : int option =
     - set the condition flags
 *)
 
+let string_of_flags (f: flags) : string =
+  String.concat " " [
+    String.concat "" ["OF:"; string_of_bool f.fo];
+    String.concat "" ["SF:"; string_of_bool f.fs];
+    String.concat "" ["ZF:"; string_of_bool f.fz]
+  ]
 
-let index_of_addr (addr:int64) : int =
-  match map_addr addr with
-  | Some i -> i
-  | None -> raise X86lite_segfault
-
-let read_quad (m:mach) (addr:int64) : int64 =
-  let i0 = index_of_addr addr in
-  let bytes = List.init 8 (fun k -> m.mem.(i0 + k)) in
-  int64_of_sbytes bytes
-
-
-let write_quad (m:mach) (addr:int64) (v:int64) : unit =
-  let i0 = index_of_addr addr in
-  let bs = sbytes_of_int64 v in
-  List.iteri (fun k sb -> m.mem.(i0 + k) <- sb) bs
-
-
-let eff_addr (m:mach) (op:operand) : int64 = 
-  match op with 
-  | Ind1 (Lit off) -> off 
-  | Ind2 r -> m.regs.(rind r)
-  | Ind3 (Lit off, r) -> Int64.add off m.regs.(rind r)
-
-  | Ind1 (Lbl _) | Ind3 (Lbl _, _) ->   invalid_arg "eff_addr: label still present (assemble should patch it)"
-
-  | Imm _ | Reg _ -> invalid_arg "eff_addr: not an indirect operand"
-let read_op (m:mach) (op:operand) : int64 =
-  match op with
-  | Imm (Lit i) -> i
-  | Reg r -> m.regs.(rind r)
-  | Ind1 _ | Ind2 _ | Ind3 _ ->
-    let a = eff_addr m op in
-      read_quad m a
-  | Imm (Lbl _) ->  invalid_arg "read_op: label still present (assemble should patch it)"
-
-let write_op (m:mach) (dst:operand) (v:int64) : unit =
-  match dst with
-  | Reg r -> m.regs.(rind r) <- v
-  | Ind1 _ | Ind2 _ | Ind3 _ ->
-    let a = eff_addr m dst in
-      write_quad m a v
-  | Imm _ ->  invalid_arg "write_op: cannot write to an immediate"
 let step (m:mach) : unit =
-failwith "step unimplemented"
+  (*fetch*)
+  let ip : quad = get_reg m Rip in
+  let instr_raw : sbyte array = read_mem_qword m ip in
+
+  (*decode*)
+  let instr : ins = match instr_raw.(0) with
+  | InsB0 i -> i
+  | InsFrag -> raise X86lite_unalignedInstruction
+  | Byte _ -> raise X86lite_nonExecutableInstruction
+  in
+
+  (*execute*)
+
+  set_reg m Rip (Int64.add (get_reg m Rip) 8L);
+
+  match ins_opcode instr with
+  | Negq -> (
+    let res = Int64_overflow.neg (read_op m (List.nth (ins_operands instr) 0)) in
+    write_op m (List.nth (ins_operands instr) 0) res.value;
+    set_flags m.flags res;
+    )
+  | Addq -> (
+    let a = read_op m (List.nth (ins_operands instr) 0) in
+    let b = read_op m (List.nth (ins_operands instr) 1) in
+    let res : Int64_overflow.t = Int64_overflow.add a b in
+    write_op m (List.nth (ins_operands instr) 1) res.value;
+    set_flags m.flags res;
+  )
+  | Subq -> (
+    let src = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res : Int64_overflow.t = Int64_overflow.sub dst src in
+    write_op m (List.nth (ins_operands instr) 1) res.value;
+    set_flags m.flags res;
+  )
+  | Imulq -> (
+    let a = read_op m (List.nth (ins_operands instr) 0) in
+    let b = read_op m (List.nth (ins_operands instr) 1) in
+    let res : Int64_overflow.t = Int64_overflow.mul a b in
+    write_op m (List.nth (ins_operands instr) 1) res.value;
+    set_flags m.flags res;
+  )
+  | Incq -> (
+    let res = Int64_overflow.succ (read_op m (List.nth (ins_operands instr) 0)) in
+    write_op m (List.nth (ins_operands instr) 0) res.value;
+    set_flags m.flags res;
+    )
+  | Decq -> (
+    let res = Int64_overflow.pred (read_op m (List.nth (ins_operands instr) 0)) in
+    write_op m (List.nth (ins_operands instr) 0) res.value;
+    set_flags m.flags res;
+    )
+  | Notq -> (
+    write_op m (List.nth (ins_operands instr) 0) (Int64.lognot (read_op m (List.nth (ins_operands instr) 0)))
+  )
+  | Andq -> (
+    let src = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res = Int64.logand src dst in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    set_flags m.flags {value = res; overflow = false}
+  )
+  | Orq -> (
+     let src = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res = Int64.logor src dst in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    set_flags m.flags {value = res; overflow = false}
+  )
+  | Xorq -> (
+     let src = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res = Int64.logxor src dst in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    set_flags m.flags {value = res; overflow = false}
+  )
+  | Sarq -> (
+    let amt = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res = Int64.shift_right dst (Int64.to_int amt) in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    if (amt = 1L) then
+      set_flags m.flags {value=res; overflow=false}
+    else if (amt <> 0L) then
+      set_flags m.flags {value=res; overflow=m.flags.fo};
+  )
+  | Shlq -> (
+    let amt = read_op m (List.nth (ins_operands instr) 0) in
+    let dst = read_op m (List.nth (ins_operands instr) 1) in
+    let res = Int64.shift_left dst (Int64.to_int amt) in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    if (amt = 1L) then
+      set_flags m.flags {value=res; overflow=false}
+    else if (amt <> 0L) then
+      set_flags m.flags {value=res; overflow=m.flags.fo};
+  )
+  | Shrq -> (
+    let amt : quad = read_op m (List.nth (ins_operands instr) 0) in
+    let dst : quad = read_op m (List.nth (ins_operands instr) 1) in
+    let res : quad = Int64.shift_right_logical dst (Int64.to_int amt) in
+    write_op m (List.nth (ins_operands instr) 1) res;
+    if (amt = 1L) then
+      set_flags m.flags {value=res; overflow=false}
+    else if (amt <> 0L) then
+      set_flags m.flags {value=res; overflow=m.flags.fo};
+  )
+  | Set cond -> (
+    let dst : quad = read_op m (List.nth (ins_operands instr) 0) in
+    let src_bytes : sbyte array = Array.of_list (sbytes_of_int64 dst) in
+    src_bytes.(0) <- Byte (if (interp_cnd m.flags cond) then (Char.chr 1) else (Char.chr 0));
+    write_op m (List.nth (ins_operands instr) 0) (int64_of_sbytes (Array.to_list src_bytes));
+  )
+  | Leaq -> (
+    let addr : quad = eff_addr m (List.nth (ins_operands instr) 0) in
+    write_op m (List.nth (ins_operands instr) 1) addr;
+  )
+  | Movq -> (
+    let src : quad = read_op m (List.nth (ins_operands instr) 0) in
+    write_op m (List.nth (ins_operands instr) 1) src;
+  )
+  | Pushq -> (
+    set_reg m Rsp (Int64.sub (get_reg m Rsp) 8L);
+    write_mem_quad m (get_reg m Rsp) (read_op m (List.nth (ins_operands instr) 0));
+  )
+  | Popq -> (
+    write_op m (List.nth (ins_operands instr) 0) (read_mem_quad m (get_reg m Rsp));
+    set_reg m Rsp (Int64.add (get_reg m Rsp) 8L);
+  )
+  | Cmpq -> (
+    let a = read_op m (List.nth (ins_operands instr) 0) in
+    let b : quad = match (List.nth (ins_operands instr) 1) with
+    | Imm _ -> raise X86lite_cmpqImmediateArgument
+    | _ -> read_op m (List.nth (ins_operands instr) 1) in
+    let res : Int64_overflow.t = Int64_overflow.sub b a in
+    set_flags m.flags res;
+  )
+  | Jmp -> (
+    let a : quad = read_op m (List.nth (ins_operands instr) 0) in
+    set_reg m Rip a;
+  )
+  | Callq -> (
+    set_reg m Rsp (Int64.sub (get_reg m Rsp) 8L);
+    write_mem_quad m (get_reg m Rsp) (get_reg m Rip);
+    let a : quad = read_op m (List.nth (ins_operands instr) 0) in
+    set_reg m Rip a;
+  )
+  | Retq -> (
+    set_reg m Rip (read_mem_quad m (get_reg m Rsp));
+    set_reg m Rsp (Int64.add (get_reg m Rsp) 8L);
+  )
+  | J cond -> (
+    let a : quad = read_op m (List.nth (ins_operands instr) 0) in
+    if (interp_cnd m.flags cond) then
+      set_reg m Rip a; 
+  )
 
 (* Runs the machine until the rip register reaches a designated
    memory address. Returns the contents of %rax when the 
    machine halts. *)
 let run (m:mach) : int64 = 
   while m.regs.(rind Rip) <> exit_addr do step m done;
-  m.regs.(rind Rax)
+  get_reg m Rax
 
 (* assembling and linking --------------------------------------------------- *)
 
