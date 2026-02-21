@@ -171,7 +171,7 @@ let sbytes_of_data (d : data) : sbyte list =
      [if !debug_simulator then print_endline @@ string_of_ins u; ...]
 
 *)
-let debug_simulator = ref false
+let debug_simulator = ref true
 
 (* Interpret a condition code with respect to the given flags. *)
 let interp_cnd (flags : flags) (cnd : cnd) : bool =
@@ -231,7 +231,7 @@ let set_reg (m : mach) (r : reg) (v : quad) : unit = m.regs.(rind r) <- v
 
 let eff_addr (m : mach) (op : operand) : int64 =
   match op with
-  | Ind1 (Lit off) -> Int64.add off (get_reg m Rip)
+  | Ind1 (Lit off) -> off
   | Ind2 r -> get_reg m r
   | Ind3 (Lit off, r) -> Int64.add off (get_reg m r)
   | Ind1 (Lbl _) | Ind3 (Lbl _, _) -> raise X86lite_unassembledLabel
@@ -697,9 +697,11 @@ let assemble (p : prog) : exec =
       text_sections
   in
   (*Debug print resolved sections before assembly*)
-  if (!debug_simulator) then
+  if (!debug_simulator) then begin
     List.iter (fun s -> print_endline (string_of_text_usection s)) text_sections;
     List.iter (fun s -> print_endline (string_of_data_usection s)) data_sections;
+  end else begin end;
+
   (*Convert sections to bytes*)
   let text_sections : asection list =
     List.map
@@ -730,9 +732,11 @@ let assemble (p : prog) : exec =
     List.concat_map (fun (ts : asection) : sbyte list -> ts.bytes) data_sections
   in
   (*Debug print sbyte outputs*)
-  if (!debug_simulator) then
+  if (!debug_simulator = true) then begin
     print_endline (string_of_segment 8 text_segment);
     print_endline (string_of_segment 8 data_segment);
+  end else begin end;
+
   (*Executable has no entry-point - Medium Assemble 2*)
   if Option.is_none (Hashtbl.find_opt label_positions "main")
   then raise (Undefined_sym "main");
@@ -750,6 +754,9 @@ let assemble (p : prog) : exec =
   }
 ;;
 
+let string_of_list (l : 'a list) (s : 'a -> string): string =
+  "[" ^ (String.concat ", " (List.map s l)) ^ "]"
+
 (* Convert an object file into an executable machine state. 
     - allocate the mem array
     - set up the memory state by writing the symbolic bytes to the 
@@ -764,5 +771,22 @@ let assemble (p : prog) : exec =
   may be of use.
 *)
 let load { entry; text_pos; data_pos; text_seg; data_seg } : mach =
-  failwith "load unimplemented"
+  let text_seg_arr = Array.of_list text_seg in
+  let data_seg_arr = Array.of_list data_seg in
+  let exit_addr_arr = Array.of_list (sbytes_of_int64 exit_addr) in
+
+  let init_regs = (Array.make nregs 0L) in
+  init_regs.(rind Rip) <- entry;
+  init_regs.(rind Rsp) <- (Int64.sub mem_top 8L);
+
+  let init_mem = (Array.make mem_size (Byte (Char.chr 0))) in
+  Array.blit text_seg_arr 0 init_mem (Int64.to_int text_pos - 0x400000) (Array.length text_seg_arr);
+  Array.blit data_seg_arr 0 init_mem (Int64.to_int data_pos - 0x400000) (Array.length data_seg_arr);
+  Array.blit exit_addr_arr 0 init_mem (Int64.to_int (Int64.sub (Int64.sub mem_top 8L) mem_bot)) (Array.length exit_addr_arr);
+
+  {
+    flags={fz=false;fs=false;fo=false};
+    regs=init_regs;
+    mem=init_mem;
+  }
 ;;
