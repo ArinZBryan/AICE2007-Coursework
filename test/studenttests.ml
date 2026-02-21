@@ -437,21 +437,21 @@ let provided_tests : suite = [
   ]);
 
   Test ("Leaq", [
-    ("leaq_ind1", machine_test "rax=0x400008+0d250" 1 leaq_ind1
+    ("leaq_ind1", machine_test "rax=0x400000+0d250" 1 leaq_ind1
       (
-        fun m -> m.regs.(rind Rax) = (Int64.add mem_bot 258L)
+        fun m -> m.regs.(rind Rax) = 250L
       )
     );
-    ("leaq_ind2", machine_test "rax=0x400008+0d250 r08=0x400008+0d250" 2 leaq_ind2
+    ("leaq_ind2", machine_test "rax=0x400000+0d250 r08=0x400000+0d250" 2 leaq_ind2
       (
-        fun m -> m.regs.(rind Rax) = (Int64.add mem_bot 258L)
-          && m.regs.(rind R08) = (Int64.add mem_bot 258L)
+        fun m -> m.regs.(rind Rax) = 250L
+          && m.regs.(rind R08) = 250L
       )
     );
-    ("leaq_ind3", machine_test "rax=0x400008+0d250 r08=0x400008+0d250+0d120" 2 leaq_ind3
+    ("leaq_ind3", machine_test "rax=0x400000+0d250 r08=0x400000+0d250+0d120" 2 leaq_ind3
       (
-        fun m -> m.regs.(rind Rax) = (Int64.add mem_bot 258L)
-          && m.regs.(rind R08) = Int64.add (Int64.add mem_bot 258L) 120L
+        fun m -> m.regs.(rind Rax) = 250L
+          && m.regs.(rind R08) = Int64.add 250L 120L
       )
     );
   ]);
